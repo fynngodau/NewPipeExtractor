@@ -1,5 +1,6 @@
 package org.schabi.newpipe.extractor.services.soundcloud;
 
+import com.grack.nanojson.JsonArray;
 import com.grack.nanojson.JsonObject;
 import com.grack.nanojson.JsonParser;
 import com.grack.nanojson.JsonParserException;
@@ -146,6 +147,9 @@ public class SoundcloudStreamExtractor extends StreamExtractor {
         String apiUrl = "https://api.soundcloud.com/i1/tracks/" + urlEncode(getId()) + "/streams"
                 + "?client_id=" + urlEncode(SoundcloudParsingHelper.clientId());
 
+        apiUrl = "https://api-v2.soundcloud.com/tracks/" + urlEncode(getId()) //+ "/streams"
+                + "?client_id=" + urlEncode(SoundcloudParsingHelper.clientId());
+
         String response = dl.get(apiUrl, getExtractorLocalization()).responseBody();
         JsonObject responseObject;
         try {
@@ -154,11 +158,44 @@ public class SoundcloudStreamExtractor extends StreamExtractor {
             throw new ParsingException("Could not parse json response", e);
         }
 
-        String mp3Url = responseObject.getString("http_mp3_128_url");
-        if (mp3Url != null && !mp3Url.isEmpty()) {
-            audioStreams.add(new AudioStream(mp3Url, MediaFormat.MP3, 128));
-        } else {
-            throw new ExtractionException("Could not get SoundCloud's track audio url");
+        // streams can now be streamable and downloadable
+        // we only care whether it is streamable; if it is not, this track might not be published yet
+        if (!responseObject.getBoolean("streamable")) return audioStreams;
+
+        try {
+            JsonArray transcodings = responseObject.getObject("media").getArray("transcodings");
+            for (Object transcoding : transcodings) {
+                JsonObject o = (JsonObject) transcoding;
+                String url = o.getString("url");
+                if (url != null && !url.isEmpty()) {
+                    url += "?client_id=" + SoundcloudParsingHelper.clientId();
+                    String res = dl.get(url).responseBody();
+                    JsonObject jsonObject2;
+                    try {
+                        jsonObject2= JsonParser.object().from(res);
+                    } catch (JsonParserException e) {
+                        throw new ParsingException("Could not parse streamable url", e);
+                    }
+
+
+                    // links in the m3u file are only valid for a short period
+                    // we need to move this into a separate method to generate valid urls when needed (e.g. resuming a stream)
+                    String m3uUrl = jsonObject2.getString("url");
+
+                    // a complete list of all formats is missing, we need to check if there are more in use
+                    if (o.getString("preset").contains("mp3")) {
+                        audioStreams.add(new AudioStream(m3uUrl, MediaFormat.MP3, 128));
+                    } else if (o.getString("preset").contains("opus")) {
+                        // the mp3 bitrate is correct, but I am not ure about the opus rate
+                        audioStreams.add(new AudioStream(m3uUrl, MediaFormat.OPUS, 128));
+                    }
+
+                }
+
+            }
+
+        } catch (NullPointerException e) {
+            throw new ExtractionException("Could not get SoundCloud's track audio url", e);
         }
 
         return audioStreams;
